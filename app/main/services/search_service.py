@@ -1,3 +1,6 @@
+from collections.abc import Mapping
+from itertools import chain
+
 from flask import current_app, url_for
 from elasticsearch import TransportError
 
@@ -48,7 +51,61 @@ def create_alias(alias_name, target_index):
         return _get_an_error_message(e), e.status_code
 
 
-def put_index_mapping(index_name, definition):
+def _dict_missing_keys_iter(old, new, prefix=""):
+    return chain.from_iterable(
+        ((prefix + k),) if k not in new else _dict_missing_keys_iter(v, new[k], prefix=prefix + k + ".")
+        for k, v in old.items()
+        if k not in new or (isinstance(new[k], Mapping) and isinstance(v, Mapping))
+    )
+
+
+def _dict_only_updated(old, new):
+    return {
+        k: (_dict_only_updated(old[k], v) if k in old and isinstance(old[k], Mapping) and isinstance(v, Mapping) else v)
+        for k, v in new.items()
+        if k not in old or old[k] != v
+    }
+
+
+def put_index_mapping(index_name, definition, put_settings=True):
+    if put_settings:
+        current_settings = es.indices.get_settings(index=index_name)[index_name]["settings"]
+        new_settings = definition.get("settings", {})
+
+        missing_settings = tuple(_dict_missing_keys_iter(current_settings, new_settings))
+        if missing_settings:
+            current_app.logger.warning(
+                "Replacement mapping file for index %s is missing settings that were previously set for this index. "
+                "This endpoint is unable to un-set these back to their default values. Instead they will be left at "
+                "their previous values. settings: %s",
+                index,
+                ", ".join(missing_settings),
+            )
+
+        updated_settings = _dict_only_updated(current_settings, new_settings)
+        raise ValueError
+        if not updated_settings:
+            current_app.logger.info(
+                "Not updating settings for index %s: no new values in new mapping file",
+                index,
+            )
+        else:
+            try:
+                es.indices.put_settings(
+                    index=index_name,
+                    body=updated_settings,
+                )
+                current_app.logger.info(
+                    "Updated the index settings for %s",
+                    index,
+                )
+            except TransportError as e:
+                current_app.logger.error(
+                    "Failed to update the index settings for %s: %s",
+                    index,
+                    _get_an_error_message(e),
+                )
+                return _get_an_error_message(e), e.status_code
     for doc_type, mapping_for_type in definition["mappings"].items():
         try:
             es.indices.put_mapping(
@@ -56,11 +113,18 @@ def put_index_mapping(index_name, definition):
                 doc_type=doc_type,
                 body=mapping_for_type
             )
+            current_app.logger.info(
+                "Updated the index mapping for %s/%s",
+                index,
+                doc_type,
+            )
 
         except TransportError as e:
             current_app.logger.error(
                 "Failed to update the index mapping for %s/%s: %s",
-                index, _get_an_error_message(e)
+                index,
+                doc_type,
+                _get_an_error_message(e),
             )
             return _get_an_error_message(e), e.status_code
     return "acknowledged", 200

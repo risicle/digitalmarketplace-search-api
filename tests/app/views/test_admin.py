@@ -108,18 +108,21 @@ class TestSearchIndexes(BaseApplicationTest):
         self.create_index()
 
         with self.app.app_context():
-            with mock.patch(
-                'app.main.services.search_service.es.indices.put_mapping'
-            ) as es_mock:
+            with mock.patch.multiple(
+                'app.main.services.search_service.es.indices',
+                put_mapping=mock.DEFAULT,
+                put_settings=mock.DEFAULT,
+            ) as mock_puts:
                 response = self.create_index()
 
         assert_response_status(response, 200)
         assert_equal("acknowledged", get_json_from_response(response)["message"])
-        es_mock.assert_called_with(
+        mock_puts["put_mapping"].assert_called_with(
             index='index-to-create',
             doc_type='services',
-            body=mock.ANY
+            body=mock.ANY,
         )
+        assert mock_puts["put_settings"].called is False
 
     def test_should_not_be_able_delete_index_twice(self):
         self.create_index()
